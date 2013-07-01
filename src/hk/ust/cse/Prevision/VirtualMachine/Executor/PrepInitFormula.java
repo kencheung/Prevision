@@ -7,6 +7,7 @@ import hk.ust.cse.Prevision.PathCondition.ConditionTerm;
 import hk.ust.cse.Prevision.PathCondition.Formula;
 import hk.ust.cse.Prevision.VirtualMachine.ExecutionOptions;
 import hk.ust.cse.Prevision.VirtualMachine.Instance;
+import hk.ust.cse.Prevision.VirtualMachine.Relation;
 import hk.ust.cse.Wala.MethodMetaData;
 
 import java.util.ArrayList;
@@ -50,9 +51,7 @@ public class PrepInitFormula {
 
       if (condition.getConditionTerms().size() == 1 && term instanceof BinaryConditionTerm) {
         BinaryConditionTerm binaryTerm = (BinaryConditionTerm) term;
-        if (binaryTerm.getComparator().equals(BinaryConditionTerm.Comparator.OP_INEQUAL) && 
-            binaryTerm.getInstance2().isAtomic() && binaryTerm.getInstance2().getValue().equals("null")) { // v1 != null
-          
+        if (binaryTerm.isNotEqualToNull()) { // v1 != null
           // XXX may not always be sound, but should be good in most cases
           ISSABasicBlock createBB = binaryTerm.getInstance2().getCreateBlock(); // where did we create this null
           if (createBB != null && createBB.getMethod().equals(methData.getIR().getMethod())) {
@@ -159,6 +158,14 @@ public class PrepInitFormula {
       // all conditions before this >= #!0 condition are discarded
       for (int i = 0; i < zeroIndex; i++) {
         formula.getConditionList().remove(0);
+      }
+      
+      // all array relation operations before this >= #!0 condition are discarded
+      Relation relation = formula.getRelation("@@array");
+      for (int i = relation.getFunctionCount() - 1; i >= 0; i--) {
+        if (relation.getFunctionTimes().get(i) < formula.getConditionList().get(0).getTimeStamp()) {
+          relation.remove(i);
+        }
       }
       
       // substitute the >= #!0 condition with < #!0 condition

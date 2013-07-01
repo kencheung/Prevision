@@ -40,6 +40,44 @@ public class BinaryConditionTerm extends ConditionTerm {
       }
     }
     
+    public Comparator getOpposite() {
+      switch (this) {
+      case OP_EQUAL:
+        return OP_INEQUAL;
+      case OP_GREATER:
+        return OP_SMALLER_EQUAL;
+      case OP_GREATER_EQUAL:
+        return OP_SMALLER;
+      case OP_INEQUAL:
+        return OP_EQUAL;
+      case OP_SMALLER:
+        return OP_GREATER_EQUAL;
+      case OP_SMALLER_EQUAL:
+        return OP_GREATER;
+      default:
+        return null;
+      }
+    }
+    
+    public Comparator getReverse() {
+      switch (this) {
+      case OP_EQUAL:
+        return OP_EQUAL;
+      case OP_GREATER:
+        return OP_SMALLER;
+      case OP_GREATER_EQUAL:
+        return OP_SMALLER_EQUAL;
+      case OP_INEQUAL:
+        return OP_INEQUAL;
+      case OP_SMALLER:
+        return OP_GREATER;
+      case OP_SMALLER_EQUAL:
+        return OP_GREATER_EQUAL;
+      default:
+        return null;
+      }
+    }
+    
     public static Comparator fromString(String str) {
       switch (str) {
       case "==":
@@ -154,6 +192,48 @@ public class BinaryConditionTerm extends ConditionTerm {
     Instance clone1 = m_instance1.deepClone(cloneMap);
     Instance clone2 = m_instance2.deepClone(cloneMap);
     return new BinaryConditionTerm(clone1, m_op, clone2);
+  }
+  
+  public ConditionTerm replaceInstances(Hashtable<Instance, Instance> replaceMap) {
+    Instance instance1 = m_instance1.replaceInstances(replaceMap);
+    Instance instance2 = m_instance2.replaceInstances(replaceMap);
+    if (instance1 != m_instance1 || instance2 != m_instance2) {
+      return new BinaryConditionTerm(instance1, m_op, instance2);
+    }
+    else {
+      return this;
+    }
+  }
+  
+  public boolean isNotEqualToNull() {
+    return m_op == Comparator.OP_INEQUAL && m_instance2.isNullConstant();
+  }
+  
+  public boolean isEqualToNull() {
+    return m_op == Comparator.OP_EQUAL && m_instance2.isNullConstant();
+  }
+  
+  public BinaryConditionTerm flip() {
+    Comparator op = m_op;
+    switch (m_op) {
+    case OP_EQUAL:
+    case OP_INEQUAL:
+      break;
+    case OP_GREATER:
+      op = Comparator.OP_SMALLER;
+      break;
+    case OP_GREATER_EQUAL:
+      op = Comparator.OP_SMALLER_EQUAL;
+      break;
+    case OP_SMALLER:
+      op = Comparator.OP_GREATER;
+      break;
+    case OP_SMALLER_EQUAL:
+      op = Comparator.OP_GREATER_EQUAL;
+    default:
+      break;
+    }
+    return new BinaryConditionTerm(m_instance2, op, m_instance1);
   }
   
   private final Instance    m_instance1;

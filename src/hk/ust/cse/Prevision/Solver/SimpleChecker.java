@@ -6,26 +6,25 @@ import hk.ust.cse.Prevision.PathCondition.Condition;
 import hk.ust.cse.Prevision.PathCondition.ConditionTerm;
 import hk.ust.cse.Prevision.PathCondition.Formula;
 import hk.ust.cse.Prevision.PathCondition.TypeConditionTerm;
-import hk.ust.cse.Prevision.Solver.NeutralInput.Assertion;
 import hk.ust.cse.Prevision.VirtualMachine.Instance;
 import hk.ust.cse.Prevision.VirtualMachine.Relation;
 import hk.ust.cse.util.Utils;
 
 import java.util.ArrayList;
-import java.util.Enumeration;
+import java.util.Arrays;
 import java.util.Hashtable;
 import java.util.List;
 
 public class SimpleChecker {
 
-  public static String simpleCheck(Formula formula, SolverInput solverInput, boolean retrieveUnsatCore) {
+  public static Object simpleCheck(Formula formula, NeutralInput neutralInput, boolean retrieveUnsatCore) {
     boolean contradicted = false;
     List<Condition> unsatCoreConds = new ArrayList<Condition>();
     
     // create instance-name mapping
     Hashtable<Instance, String> instanceNameMapping = new Hashtable<Instance, String>();
-    if (solverInput != null) {
-      instanceNameMapping = solverInput.getNeutralInput().getInstanceNameMapping();
+    if (neutralInput != null) {
+      instanceNameMapping = neutralInput.getInstanceNameMapping();
     }
 
     Hashtable<List<String>, List<Object[]>> statements = 
@@ -43,9 +42,11 @@ public class SimpleChecker {
       
       if (condTerm instanceof TypeConditionTerm) {
         TypeConditionTerm thisTypeTerm = (TypeConditionTerm) condTerm;
+        Class<?> typeClass = Utils.findClass(thisTypeTerm.getTypeString());
         
         if (thisTypeTerm.getComparator() == TypeConditionTerm.Comparator.OP_INSTANCEOF && 
-            thisTypeTerm.getInstance1().getLastReference() != null) {
+            thisTypeTerm.getInstance1().getLastReference() != null && 
+            typeClass != null && !typeClass.isInterface()) {
           String instanceStr1 = thisTypeTerm.getInstance1().getLastReference().getNameWithCallSite();
           List<Condition> prevTypes = prevInstanceOf.get(instanceStr1);
           if (prevTypes == null) {
@@ -113,10 +114,7 @@ public class SimpleChecker {
         }
         
         // simplify rule 4: 
-        List<String> key = new ArrayList<String>();
-        key.add(var1Str);
-        key.add(var2Str);
-        
+        List<String> key = Arrays.asList(var1Str, var2Str);
         List<Object[]> previousOps = statements.get(key);
         if (previousOps == null) {
           previousOps = new ArrayList<Object[]>();
@@ -171,49 +169,22 @@ public class SimpleChecker {
           }
         }
         previousOps.add(new Object[] {op, conditions.get(i)});
+        
+        // also put in the reverse, e.g. null != v1
+        if (!var1Str.equals(var2Str)) {
+          key = Arrays.asList(var2Str, var1Str);
+          previousOps = statements.get(key);
+          if (previousOps == null) {
+            previousOps = new ArrayList<Object[]>();
+            statements.put(key, previousOps);
+          }
+          previousOps.add(new Object[] {op.getReverse(), conditions.get(i)});
+        }
       }
     }
     
-    StringBuilder outputStr = new StringBuilder();
-    if (contradicted) {
-      outputStr.append("unsat").append(LINE_SEPARATOR);
-      
-      // retrieve unsat core
-      if (retrieveUnsatCore) {
-        List<Assertion> assertions                    = solverInput.getNeutralInput().getAssertions();
-        Hashtable<Assertion, List<Condition>> mapping = solverInput.getNeutralInput().getAssertionCondsMapping();
-        List<Integer> unsatCoreIds = new ArrayList<Integer>();
-        for (Condition unsatCoreCond : unsatCoreConds) {
-          Enumeration<Assertion> keys = mapping.keys();
-          while (keys.hasMoreElements()) {
-            Assertion key = (Assertion) keys.nextElement();
-            List<Condition> conds = mapping.get(key);
-            if (conds.contains(unsatCoreCond)) {
-              int index = assertions.indexOf(key);
-              if (index >= 0) {
-                unsatCoreIds.add(index + 1);
-              }
-            }
-          }
-        }
-        if (unsatCoreIds.size() > 0) {
-          outputStr.append("unsat core ids: ");
-          for (int i = 0, size = unsatCoreIds.size(); i < size; i++) {
-            outputStr.append(unsatCoreIds.get(i));
-            if (i != size - 1) {
-              outputStr.append(" ");
-            }
-          }
-          outputStr.append(LINE_SEPARATOR);
-        }
-      }
-      outputStr.append("Proven contradicted by simple checker.");
-    }
-    else {
-      outputStr.append("sat");
-    }
-    
-    return outputStr.toString();
+    Object output = contradicted ? unsatCoreConds.toArray(new Condition[unsatCoreConds.size()]) : "sat";
+    return output;
   }
     
   private static String getInstanceName(Instance instance, Formula formula, Hashtable<Instance, String> instanceNameMapping) {
@@ -262,8 +233,8 @@ public class SimpleChecker {
         }
       }
       else if (instance.isRelationRead()) {
-        String relName = Relation.getReadStringRelName(instance.getLastRefName());
-        long readTime  = Relation.getReadStringTime(instance.getLastRefName());
+        String relName = instance.getLastReference().getReadRelName();
+        long readTime  = instance.getLastReference().getReadRelTime();
         
         Relation relation = formula.getAbstractMemory().getRelation(relName);
         int index = relation.getIndex(readTime);
@@ -286,6 +257,4 @@ public class SimpleChecker {
     
     return str;
   }
-  
-  private static final String LINE_SEPARATOR = System.getProperty("line.separator");
 }

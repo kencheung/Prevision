@@ -19,6 +19,7 @@ import hk.ust.cse.Prevision.Solver.SolverInput;
 
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 
@@ -31,6 +32,7 @@ import com.microsoft.z3.Context;
 import com.microsoft.z3.DatatypeSort;
 import com.microsoft.z3.Expr;
 import com.microsoft.z3.IntExpr;
+import com.microsoft.z3.IntNum;
 import com.microsoft.z3.Sort;
 import com.microsoft.z3.Symbol;
 import com.microsoft.z3.TupleSort;
@@ -50,6 +52,9 @@ public class Z3Input extends SolverInput {
     m_arrayMapping      = new Hashtable<ArrayExpr, DefineArray>();
     m_assertionMapping1 = new Hashtable<BoolExpr, Assertion>();
     m_assertionMapping2 = new Hashtable<Assertion, BoolExpr>();
+    m_intNumCache       = new Hashtable<Long, IntNum>();
+    m_arraySelectCache  = new Hashtable<String, Expr>();
+    m_addedInRangesAssertion = new HashSet<String>();
 
     defineSorts();
     defineConstants();
@@ -75,12 +80,13 @@ public class Z3Input extends SolverInput {
     for (DefineConstant defineConstant : m_neutralInput.getDefineConstants()) {
       Expr constant = null;
       if (defineConstant.value != null) { // known constant
-        constant = m_ctx.mkInt(defineConstant.value);
+        constant = mkIntNum(defineConstant.value);
       }
       else {
         Sort sort = findTypeSort(defineConstant.type);
         constant = m_ctx.mkConst(defineConstant.name, sort);
-        m_assertionExprs.add(createInRangesAssertionExpr(constant, defineConstant.type));
+        m_assertionExprs.add(createInRangesAssertionExpr(constant, defineConstant.type, true));
+        m_addedInRangesAssertion.add(defineConstant.name);
       }
       m_definedConstants.put(defineConstant.name, constant);
       m_constantMapping.put(constant, defineConstant);
@@ -94,7 +100,8 @@ public class Z3Input extends SolverInput {
       m_constantMapping.put(constant, defineHelper);
       
       if (!defineHelper.type.equals("bitvector32")) {
-        m_assertionExprs.add(createInRangesAssertionExpr(constant, defineHelper.type));
+        m_assertionExprs.add(createInRangesAssertionExpr(constant, defineHelper.type, true));
+        m_addedInRangesAssertion.add(defineHelper.name);
       }
     }
   }
@@ -119,33 +126,44 @@ public class Z3Input extends SolverInput {
       }
       else { // array store
         DefineArrayStore defineArrayStore = (DefineArrayStore) defineArray;
+        
         ArrayExpr fromArray = findArrayExpr(defineArrayStore.getStoreFromArrayName());
-        
-        // define a new array constant: f@2
-        String newArrayName = defineArrayStore.getStoreToArrayName();
-        ArrayExpr array = m_ctx.mkArrayConst(newArrayName, domainsSort, rangeSort);
-        m_definedArrays.put(newArrayName, array);
-        m_arrayMapping.put(array, defineArrayStore);
-
-        // create expression: (store f domains newValue)
-        Expr tuple      = domainsSort.mkDecl().apply(findConstantExprs(defineArrayStore.domains));
-        Expr rangeValue = findConstantExpr(defineArrayStore.value);
-        
-        ArrayExpr storedArray = null;
         if (fromArray == null && !m_neutralInput.keepUnboundField()) {
           throw new Exception("Could not create solver input due to the removal of %%UnboundField%%. Good to go on!");
         }
+
+        // get Expr for domains and range
+        Expr rangeValue = findConstantExpr(defineArrayStore.value);
+        Expr tuple      = domainsSort.mkDecl().apply(findConstantExprs(defineArrayStore.domains));
+        
+        // define the new array
+        ArrayExpr toArray = null;
+        if (defineArrayStore.arrayName.matches("@@array[@0-9]*") && 
+            defineArrayStore.domains[0].value.matches("##.*\\.value")) { // use assertion instead because array store is expensive
+
+          toArray = fromArray;
+          
+          // (assert (= (select array@2 ##str.value 0) 115))
+          m_assertionExprs.add(m_ctx.mkEq(m_ctx.mkSelect(fromArray, tuple), rangeValue));
+        }
         else {
-          storedArray = m_ctx.mkStore(fromArray, tuple, rangeValue);
+          // define a new array constant: f@2
+          toArray = m_ctx.mkArrayConst(defineArrayStore.getStoreToArrayName(), domainsSort, rangeSort);
+
+          // create expression: (store f domains newValue)
+          ArrayExpr storedArray = m_ctx.mkStore(fromArray, tuple, rangeValue);
+          
+          // (assert (= f@2 (store f domains newValue)))
+          m_assertionExprs.add(m_ctx.mkEq(toArray, storedArray));
         }
         
-        // (assert (= f@2 (store f domains newValue)))
-        m_assertionExprs.add(m_ctx.mkEq(array, storedArray));
+        m_definedArrays.put(defineArrayStore.getStoreToArrayName(), toArray);
+        m_arrayMapping.put(toArray, defineArrayStore);
       }
     }
   }
   
-  private void createAssertionExprs() throws Z3Exception {
+  private void createAssertionExprs() throws Exception {
     for (Assertion assertion : m_neutralInput.getAssertions()) {
       BoolExpr expr = createAssertionExpr((Assertion) assertion);
       m_assertionExprs.add(expr);
@@ -154,7 +172,7 @@ public class Z3Input extends SolverInput {
     }
   }
   
-  private void createHelperAssertionExprs() throws Z3Exception {
+  private void createHelperAssertionExprs() throws Exception {
     Hashtable<Expression, Expression> helperMapping = m_neutralInput.getHelperMapping();
     Enumeration<Expression> keys = helperMapping.keys();
     while (keys.hasMoreElements()) {
@@ -172,7 +190,7 @@ public class Z3Input extends SolverInput {
     }
   }
   
-  private BoolExpr createAssertionExpr(Assertion assertion) throws Z3Exception {
+  private BoolExpr createAssertionExpr(Assertion assertion) throws Exception {
     BoolExpr assertionExpr = null;
     
     if (assertion instanceof AtomicAssertion) {
@@ -193,7 +211,7 @@ public class Z3Input extends SolverInput {
     return assertionExpr;
   }
   
-  private BoolExpr createAssertionExpr(AtomicAssertion assertion) throws Z3Exception {
+  private BoolExpr createAssertionExpr(AtomicAssertion assertion) throws Exception {
     if (assertion.value.equals("true")) {
       return m_ctx.mkTrue();
     }
@@ -202,9 +220,9 @@ public class Z3Input extends SolverInput {
     }
   }
   
-  private BoolExpr createAssertionExpr(BinaryAssertion assertion) throws Z3Exception {
+  private BoolExpr createAssertionExpr(BinaryAssertion assertion) throws Exception {
     BoolExpr assertionExpr = null;
-    
+
     ArithExpr expr1 = (ArithExpr) findConstantExpr(assertion.expr1);
     ArithExpr expr2 = (ArithExpr) findConstantExpr(assertion.expr2);
     switch (assertion.comp) {
@@ -233,7 +251,7 @@ public class Z3Input extends SolverInput {
     return assertionExpr;
   }
   
-  private BoolExpr createAssertionExpr(TypeAssertion assertion) throws Z3Exception {
+  private BoolExpr createAssertionExpr(TypeAssertion assertion) throws Exception {
     BoolExpr assertionExpr = null;
 
     ArithExpr expr = (ArithExpr) findConstantExpr(assertion.expr);
@@ -242,16 +260,16 @@ public class Z3Input extends SolverInput {
     case OP_INSTANCEOF:
       BoolExpr[] andExprs = new BoolExpr[subRanges.size()];
       for (int i = 0, size = subRanges.size(); i < size; i++) {
-        andExprs[i] = m_ctx.mkAnd(m_ctx.mkGe(expr, m_ctx.mkInt(subRanges.get(i)[0])), 
-                                  m_ctx.mkLe(expr, m_ctx.mkInt(subRanges.get(i)[1])));
+        andExprs[i] = m_ctx.mkAnd(m_ctx.mkGe(expr, mkIntNum(subRanges.get(i)[0])), 
+                                  m_ctx.mkLe(expr, mkIntNum(subRanges.get(i)[1])));
       }
       assertionExpr = m_ctx.mkOr(andExprs);
       break;
     case OP_NOT_INSTANCEOF:
       BoolExpr[] orExprs = new BoolExpr[subRanges.size()];
       for (int i = 0, size = subRanges.size(); i < size; i++) {
-        orExprs[i] = m_ctx.mkOr(m_ctx.mkLt(expr, m_ctx.mkInt(subRanges.get(i)[0])), 
-                                m_ctx.mkGt(expr, m_ctx.mkInt(subRanges.get(i)[1])));
+        orExprs[i] = m_ctx.mkOr(m_ctx.mkLt(expr, mkIntNum(subRanges.get(i)[0])), 
+                                m_ctx.mkGt(expr, mkIntNum(subRanges.get(i)[1])));
       }
       assertionExpr = m_ctx.mkAnd(orExprs);
       break;
@@ -262,7 +280,7 @@ public class Z3Input extends SolverInput {
     return assertionExpr;
   }
   
-  private BoolExpr createAssertionExpr(MultiAssertion assertion) throws Z3Exception {
+  private BoolExpr createAssertionExpr(MultiAssertion assertion) throws Exception {
     BoolExpr assertionExpr = null;
     
     BoolExpr[] subExprs = new BoolExpr[assertion.assertions.length];
@@ -286,26 +304,26 @@ public class Z3Input extends SolverInput {
     return assertionExpr;
   }
   
-  private BoolExpr createInRangesAssertionExpr(Expr constant, String typeName) throws Z3Exception {
+  private BoolExpr createInRangesAssertionExpr(Expr constant, String typeName, boolean inclNull) throws Z3Exception {
     List<long[]> ranges = m_neutralInput.getTypeRanges().get(typeName);
     
     List<BoolExpr> andExprs = new ArrayList<BoolExpr>();
     for (int i = 0, size = ranges.size(); i < size; i++) {
-      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, m_ctx.mkInt(ranges.get(i)[0])), 
-                               m_ctx.mkLe((ArithExpr) constant, m_ctx.mkInt(ranges.get(i)[1]))));
+      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, mkIntNum(ranges.get(i)[0])), 
+                               m_ctx.mkLe((ArithExpr) constant, mkIntNum(ranges.get(i)[1]))));
     }
     if (typeName.equals("I") || typeName.equals("S") || typeName.equals("J") || typeName.equals("D") || typeName.equals("F")) {
-      andExprs.add(m_ctx.mkEq((ArithExpr) constant, m_ctx.mkInt(0)));
-      andExprs.add(m_ctx.mkEq((ArithExpr) constant, m_ctx.mkInt(1)));
-      andExprs.add(m_ctx.mkEq((ArithExpr) constant, m_ctx.mkInt(2)));
-      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, m_ctx.mkInt(-10)), 
-                               m_ctx.mkLe((ArithExpr) constant, m_ctx.mkInt(10))));
+      andExprs.add(m_ctx.mkEq((ArithExpr) constant, mkIntNum(0)));
+      andExprs.add(m_ctx.mkEq((ArithExpr) constant, mkIntNum(1)));
+      andExprs.add(m_ctx.mkEq((ArithExpr) constant, mkIntNum(2)));
+      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, mkIntNum(-10)), 
+                               m_ctx.mkLe((ArithExpr) constant, mkIntNum(10))));
     }
     else if (typeName.equals("C")) {
-      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, m_ctx.mkInt(32)), 
-                               m_ctx.mkLe((ArithExpr) constant, m_ctx.mkInt(126))));
+      andExprs.add(m_ctx.mkAnd(m_ctx.mkGe((ArithExpr) constant, mkIntNum(32)), 
+                               m_ctx.mkLe((ArithExpr) constant, mkIntNum(126))));
     }
-    else if (m_neutralInput.getBasicTypes().get(typeName) == null) {
+    else if (m_neutralInput.getBasicTypes().get(typeName) == null && inclNull) {
       andExprs.add(m_ctx.mkEq((ArithExpr) constant, findConstantExpr("null")));
     }
     
@@ -319,20 +337,20 @@ public class Z3Input extends SolverInput {
   private IntExpr BV2Int(BitVecExpr bv, boolean signed, int nbit) throws Z3Exception {
     IntExpr ret = null;
     if (nbit == 1) {
-      ret = (IntExpr) m_ctx.mkITE(m_ctx.mkEq(bv, m_ctx.mkBV(0, 32)), m_ctx.mkInt(0), m_ctx.mkInt(1));
+      ret = (IntExpr) m_ctx.mkITE(m_ctx.mkEq(bv, m_ctx.mkBV(0, 32)), mkIntNum(0), mkIntNum(1));
     }
     else { 
       int halfb = nbit / 2;
       int mulBy = (int) Math.pow(2, halfb);
       IntExpr intL = BV2Int(m_ctx.mkBVAND(bv, m_ctx.mkBV(mulBy - 1, 32)), signed, halfb);
       IntExpr intH = BV2Int(m_ctx.mkBVLSHR(bv, m_ctx.mkBV(halfb, 32)), signed, halfb);
-      ret = (IntExpr) m_ctx.mkAdd(m_ctx.mkMul(intH, m_ctx.mkInt(mulBy)), intL);
+      ret = (IntExpr) m_ctx.mkAdd(m_ctx.mkMul(intH, mkIntNum(mulBy)), intL);
     }
     
     // convert to signed integer
     if (nbit == 32 && signed) {
       ret = (IntExpr) m_ctx.mkITE(m_ctx.mkGt(ret, 
-          m_ctx.mkInt(2147483647)), m_ctx.mkSub(ret, m_ctx.mkInt(4294967296L)), ret);
+          mkIntNum(2147483647)), m_ctx.mkSub(ret, mkIntNum(4294967296L)), ret);
     }
     return ret;
   }
@@ -341,7 +359,7 @@ public class Z3Input extends SolverInput {
     return m_definedSorts.get(typeName);
   }
 
-  private Expr[] findConstantExprs(Expression[] constants) throws Z3Exception {
+  private Expr[] findConstantExprs(Expression[] constants) throws Exception {
     Expr[] exprs = new Expr[constants.length];
     for (int i = 0; i < constants.length; i++) {
       exprs[i] = findConstantExpr(constants[i]);
@@ -349,7 +367,7 @@ public class Z3Input extends SolverInput {
     return exprs;
   }
   
-  private Expr findConstantExpr(Expression constant) throws Z3Exception {
+  private Expr findConstantExpr(Expression constant) throws Exception {
     Expr expr = null;
     
     if (constant instanceof NormalExpr) {
@@ -378,7 +396,7 @@ public class Z3Input extends SolverInput {
     Expr expr = m_definedConstants.get(constant.value);
     if (expr == null) {
       try {
-        expr = m_ctx.mkInt(constant.value);
+        expr = mkIntNum(constant.value);
       } catch (Z3Exception e) {}
     }
     if (expr == null) {
@@ -393,7 +411,7 @@ public class Z3Input extends SolverInput {
     return expr;
   }
   
-  private Expr findConstantExpr(ArithmeticExpr constant) throws Z3Exception {
+  private Expr findConstantExpr(ArithmeticExpr constant) throws Exception {
     Expr expr = null;
 
     ArithExpr left  = (ArithExpr) findConstantExpr(constant.left);
@@ -410,7 +428,7 @@ public class Z3Input extends SolverInput {
         break;
       case DIV:
         expr = m_ctx.mkDiv(left, right); // can handle both integer and real divisions
-        m_assertionExprs.add(m_ctx.mkNot(m_ctx.mkEq(right, m_ctx.mkInt(0))));
+        m_assertionExprs.add(m_ctx.mkNot(m_ctx.mkEq(right, mkIntNum(0))));
         break;
       case REM:
         expr = m_ctx.mkMod((IntExpr) left, (IntExpr) right); // not mkRem
@@ -422,7 +440,7 @@ public class Z3Input extends SolverInput {
     return expr;
   }
   
-  private Expr findConstantExpr(BVArithmeticExpr constant) throws Z3Exception {
+  private Expr findConstantExpr(BVArithmeticExpr constant) throws Exception {
     Expr expr = null;
     
     BitVecExpr left  = (BitVecExpr) findConstantExpr(constant.left);
@@ -453,11 +471,20 @@ public class Z3Input extends SolverInput {
     return expr;
   }
   
-  private Expr findConstantExpr(ReadArrayExpr constant) throws Z3Exception {
+  private Expr findConstantExpr(ReadArrayExpr constant) throws Exception {
+    Expr arraySelect = m_arraySelectCache.get(constant.toString());
+    if (arraySelect != null) {
+      return arraySelect;
+    }
+
     ArrayExpr array = m_definedArrays.get(constant.getReadAtArrayName());
+    if (array == null && !m_neutralInput.keepUnboundField()) {
+      throw new Exception("Could not create solver input due to the removal of %%UnboundField%%. Good to go on!");
+    }
+    
     DatatypeSort domainsSort = (DatatypeSort) ((ArraySort) array.getSort()).getDomain();
     Expr tuple = domainsSort.getConstructors()[0].apply(findConstantExprs(constant.domains));
-    Expr arraySelect = m_ctx.mkSelect(array, tuple);
+    arraySelect = m_ctx.mkSelect(array, tuple);
 
     // constraint the value of the selected element according to type
     if (constant.arrayName.startsWith("@@array")) {
@@ -465,22 +492,55 @@ public class Z3Input extends SolverInput {
       if (refConstant != null && refConstant.type != null && refConstant.type.length() > 0) {
         String elemType = refConstant.type.substring(1);
         if (m_definedSorts.containsKey(elemType)) {
-          m_assertionExprs.add(createInRangesAssertionExpr(arraySelect, elemType));
+          if (!m_addedInRangesAssertion.contains(constant.toString())) {
+            m_assertionExprs.add(createInRangesAssertionExpr(arraySelect, elemType, true));
+            m_addedInRangesAssertion.add(constant.toString());
+          }
         }
       }
     }
     else {
+      // constraint the value of the selected element according to return type
       DefineArray definedArray = m_arrayMapping.get(array);
       if (m_definedSorts.containsKey(definedArray.returnType)) {
-        m_assertionExprs.add(createInRangesAssertionExpr(arraySelect, definedArray.returnType));
+        if (!m_addedInRangesAssertion.contains(constant.toString())) {
+          m_assertionExprs.add(createInRangesAssertionExpr(arraySelect, definedArray.returnType, true));
+          m_addedInRangesAssertion.add(constant.toString());
+        }
+      }
+      // constraint the value of the reference element according to field reference type
+      if (m_definedSorts.containsKey(definedArray.paramTypes[0])) {
+        Expr fieldRefExpr = findConstantExpr(constant.domains[0]);
+        if (!m_addedInRangesAssertion.contains(fieldRefExpr.toString())) {
+          m_assertionExprs.add(createInRangesAssertionExpr(fieldRefExpr, definedArray.paramTypes[0], false));
+          m_addedInRangesAssertion.add(fieldRefExpr.toString());
+        }
       }
     }
     
+    m_arraySelectCache.put(constant.toString(), arraySelect);
     return arraySelect;
   }
   
   private ArrayExpr findArrayExpr(String arrayName) {
     return m_definedArrays.get(arrayName);
+  }
+  
+  private IntNum mkIntNum(String strValue) throws Z3Exception {
+    Long numValue = null;
+    try {
+      numValue = Long.parseLong(strValue);
+    } catch (NumberFormatException e) {}
+    return numValue != null ? mkIntNum(numValue) : m_ctx.mkInt(strValue);
+  }
+  
+  private IntNum mkIntNum(long intValue) throws Z3Exception {
+    IntNum intNum = m_intNumCache.get(intValue);
+    if (intNum == null) {
+      intNum = m_ctx.mkInt(intValue);
+      m_intNumCache.put(intValue, intNum);
+    }
+    return intNum;
   }
   
   public Context getContext() {
@@ -565,4 +625,7 @@ public class Z3Input extends SolverInput {
   private final Hashtable<ArrayExpr, DefineArray> m_arrayMapping;
   private final Hashtable<BoolExpr, Assertion>    m_assertionMapping1;
   private final Hashtable<Assertion, BoolExpr>    m_assertionMapping2;
+  private final Hashtable<Long, IntNum>           m_intNumCache;
+  private final Hashtable<String, Expr>           m_arraySelectCache;
+  private final HashSet<String>                   m_addedInRangesAssertion;
 }

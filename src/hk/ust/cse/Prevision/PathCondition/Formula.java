@@ -158,9 +158,8 @@ public class Formula {
   }
   
   public Instance[] getReadRelationDomainValues(Instance readInstance) {
-    String readStr = readInstance.toString();
-    String relName = Relation.getReadStringRelName(readStr);
-    long readTime  = Relation.getReadStringTime(readStr);
+    String relName = readInstance.getLastReference().getReadRelName();
+    long readTime  = readInstance.getLastReference().getReadRelTime();
     
     Relation relation = getRelation(relName);
     int index = relation.getIndex(readTime);
@@ -202,7 +201,10 @@ public class Formula {
         }
         else {
           if (previousLine > 0 && currentLine > 0 && previousLine < currentLine) {
-            count++;
+            if (!newlyVisited.methData.getIR().getMethod().isInit() || 
+                 newlyVisited.methData.getLineNumber(0) != currentLine) { // assigning initial field values may go back and forth, but it is not in a loop
+              count++;
+            }
           }
           else if (previousLine <= 0 || currentLine <= 0 || previousLine == currentLine) {
             if (newlyVisited.previousBB.getNumber() < newlyVisited.currentBB.getNumber()) {
